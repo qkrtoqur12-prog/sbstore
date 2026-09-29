@@ -5,6 +5,9 @@ from app.services.naver_keywordstool import NaverKeywordsTool
 
 MIN_KEYWORDS = 10
 REFINE_CANDIDATE_COUNT = 12
+# 2차 정제(검색량 높은 동의어로 핵심 단어 교체)는 실데이터 평가에서 오히려 정확도를 떨어뜨려 기본 비활성화.
+# (2026-09-30, 사람이 수정한 상품명 80건 비교: 글자유사도 켬 0.51/0.60 -> 끔 0.57/0.66. 카네이션브로치 -> 꽃브로치, 골드링 -> 금반지처럼 넓은 고검색량어로 바꿈)
+USE_REFINE = False
 
 
 def _is_redundant_with_name(keyword: str, name: str) -> bool:
@@ -80,9 +83,13 @@ def _keeps_head(product_name: str, name: str) -> bool:
 # 프롬프트 규칙 2의 "빼도 되는" 범용 수식어. 이 외의 단어는 상품을 구별하는 단어일 수 있다.
 _GENERIC_WORDS = {
     "다용도", "다목적", "차량용", "휴대용", "여행용", "스텐", "플라스틱", "pc", "실리콘", "우드",
-    "사각", "원형", "접이식", "부착식", "컬러", "블랙", "화이트", "투명", "미니", "소형", "심플", "초간단",
+    "사각", "원형", "접이식", "부착식", "컬러", "칼라", "블랙", "화이트", "투명", "미니", "소형", "심플", "초간단",
+    # 실데이터 4,266건에서 사람이 대부분 지운 단어
+    "프리미엄", "클래식", "데일리", "클린", "디자인", "다기능", "캐릭터", "빈티지", "인테리어", "포인트",
+    "전설의", "착한", "인기", "고급", "국산", "가정용", "일반", "장식용소품", "소품", "장식품", "장난감",
+    "도구", "보관", "모양", "diy", "만들기", "택1", "랜덤", "색상랜덤", "디자인랜덤",
 }
-_QUANTITY = re.compile(r"^\d+(p|개|세트|종|구|색|묶음)?$")
+_QUANTITY = re.compile(r"^\d+(p|ea|개|장|쌍|세트|종|구|색|묶음)?$")
 
 
 def _dropped_words(product_name: str, name: str) -> list[str]:
@@ -207,20 +214,21 @@ class ProductOptimizer:
         # 실제 검색량 데이터를 참고해 상품명의 핵심 단어를 더 검색되는 동의어로 교체 시도
         # (관련성 낮은 naver_results 전체가 아니라 LLM이 제안한 후보 키워드 중 상위만 사용)
         top_for_refine = relevant_candidates[:REFINE_CANDIDATE_COUNT]
-        try:
-            refined = await self.name_generator.refine_name(product_name, optimized_name, top_for_refine, product_type)
-            # 2차 정제가 원본으로 되돌려 놓았거나, 범위를 좁혔거나(걸이 -> 수건걸이), 단어만 삭제한 경우엔 1차 초안 유지.
-            # 원본 근거 데이터가 없는 상품은 검색량 후보도 추측에서 나온 것이라, 원본과 글자가 하나도 안 겹치는 교체도 막는다.
-            if (
-                refined and refined.strip()
-                and _normalize(refined) != _normalize(product_name)
-                and not _narrows_scope(product_name, optimized_name, refined)
-                and not _only_deletes(optimized_name, refined)
-                and (has_data or (_bigrams(_normalize(refined)) & _bigrams(_normalize(product_name)) and _keeps_head(product_name, refined) and not _dropped_words(product_name, refined)))
-            ):
-                optimized_name = refined.strip()
-        except Exception:
-            pass  # 개선 실패 시 1차 초안 이름 그대로 사용
+        if USE_REFINE:
+            try:
+                refined = await self.name_generator.refine_name(product_name, optimized_name, top_for_refine, product_type)
+                # 2차 정제가 원본으로 되돌려 놓았거나, 범위를 좁혔거나(걸이 -> 수건걸이), 단어만 삭제한 경우엔 1차 초안 유지.
+                # 원본 근거 데이터가 없는 상품은 검색량 후보도 추측에서 나온 것이라, 원본과 글자가 하나도 안 겹치는 교체도 막는다.
+                if (
+                    refined and refined.strip()
+                    and _normalize(refined) != _normalize(product_name)
+                    and not _narrows_scope(product_name, optimized_name, refined)
+                    and not _only_deletes(optimized_name, refined)
+                    and (has_data or (_bigrams(_normalize(refined)) & _bigrams(_normalize(product_name)) and _keeps_head(product_name, refined) and not _dropped_words(product_name, refined)))
+                ):
+                    optimized_name = refined.strip()
+            except Exception:
+                pass  # 개선 실패 시 1차 초안 이름 그대로 사용
 
         # 이름이 교체되어 기존 조회 결과에 없을 수 있으므로 실제 검색량 재조회
         if optimized_name.replace(" ", "") not in volume_by_keyword:
