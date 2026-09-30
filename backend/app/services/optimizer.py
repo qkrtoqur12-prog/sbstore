@@ -266,12 +266,8 @@ class ProductOptimizer:
                 candidates = retried
             else:
                 candidates = {**retried, "optimized_name": product_name}
-        if _normalize(candidates["optimized_name"]) == _normalize(product_name):
-            # 규칙 1(무조건 변경) 위반 - 한 번만 다시 요청
-            retry_note = f"{context}\n주의: 이전 응답이 원본과 똑같은 '{candidates['optimized_name']}'였습니다. 같은 물건을 가리키는 범위 안에서 반드시 다르게 바꾸세요 (띄어쓰기, 대체어, 영문 대문자 정규화, 불필요한 단어 제거 등)."
-            retried = await self.name_generator.generate_candidates(product_name, retry_note)
-            if _normalize(retried["optimized_name"]) != _normalize(product_name) and not guessed(retried["optimized_name"]):
-                candidates = retried
+        # 원본과 똑같은 이름이 나와도 다시 요청하지 않는다: 재요청해도 대부분 그대로라 비용만 늘었고(20건 중 7번, 건당 약 +1원),
+        # 다른 판매자와 이름이 겹치지 않게 하는 역할은 맨 마지막의 동의어 교체가 맡는다 (사용자 결정, 2026-09-30)
         optimized_name = _drop_invented_quantity(product_name, candidates["optimized_name"])
         candidate_keywords = candidates["keywords"]
         product_type = candidates.get("product_type", "")
