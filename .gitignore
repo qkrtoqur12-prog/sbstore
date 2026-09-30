@@ -7,4 +7,3 @@ backend/app/services/__pycache__/
 backend/.env
 backend/app/data/naver_categories_cache.json
 .DS_Store
-backend/app/data/name_examples.json

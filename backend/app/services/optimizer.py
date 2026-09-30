@@ -146,6 +146,23 @@ class ProductOptimizer:
                 rows.append(r)
                 seen.add(r["keyword"])
 
+        # 연관어가 상품명을 쪼갠 조합뿐이면(초간단 링게이지 -> 링게이지블랙, 초간단링게이지) 쓰임새 정보가 없는 것과 같으므로
+        # 데이터 없음과 똑같이 핵심 명사 참고 조회를 붙인다 (단 실제 검색어는 있으니 has_data 판정은 유지)
+        if rows and all(r["keyword"].lower() in whole.lower() for r in rows):
+            head = _head_noun(product_name)
+            if len(head) >= 2 and head != whole:
+                try:
+                    head_rows = [r for r in await self.naver.get_related_keywords([head]) if head in r["keyword"] and r["keyword"] != head][:15]
+                except Exception:
+                    head_rows = []
+                if head_rows:
+                    rows_str = ", ".join(f"{r['keyword']}({r['total']})" for r in rows)
+                    return (
+                        f"{spelling_note}\n네이버 연관검색어(실제 구매자 검색어, 월 검색량): {rows_str}"
+                        f"\n참고 - 핵심 명사 '{head}'가 들어간 검색어(수식어가 빠진 결과라 쓰임새 파악용으로만 참고): "
+                        + ", ".join(f"{r['keyword']}({r['total']})" for r in head_rows)
+                    ), True
+
         if not rows:
             # 상품명 전체로는 데이터가 없을 때, 핵심 명사만 조회해서 그 명사가 들어간 검색어로 쓰임새를 짐작하게 한다
             # (예: 삐에로 넥카라 -> 강아지넥카라/고양이넥카라 = 반려동물용). 수식어가 빠진 결과라 '참고용'으로만 준다.
