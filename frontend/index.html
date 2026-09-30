@@ -52,12 +52,14 @@
     </select>
     <button id="bulkBtn" onclick="runBulk()">엑셀 일괄 처리</button>
     <button class="secondary" onclick="exportExcel()" id="exportBtn" disabled>결과 엑셀로 저장</button>
+    <button class="secondary" onclick="clearResults()" id="clearBtn" disabled>결과 비우기</button>
   </div>
   <div class="sub" style="margin-top:8px;">엑셀에 "상품명" 이라는 헤더가 있는 컬럼(없으면 첫번째 컬럼)을 읽습니다. Gemini는 무료지만 하루 20건 한도가 있어, 대량 처리는 Claude를 권장합니다.</div>
   <div class="loading" id="bulkLoading" style="display:none;">일괄 처리 중입니다... 상품 수에 따라 시간이 걸릴 수 있습니다.</div>
 </div>
 
 <div class="card">
+  <div class="sub" id="resultCount" style="margin-bottom:0;"></div>
   <table id="resultTable">
     <thead>
       <tr>
@@ -72,9 +74,18 @@
 </div>
 
 <script>
-let results = [];
+// 결과는 브라우저 저장소에도 보관해서 새로고침/창 닫기/서버 재시작에도 남게 한다
+// (예전엔 화면 메모리에만 있어서 새로고침하면 100건 결과가 통째로 사라졌음)
+const RESULTS_KEY = 'optimizerResults';
+let results = (() => { try { return JSON.parse(localStorage.getItem(RESULTS_KEY) || '[]'); } catch (e) { return []; } })();
+
+function saveResults() {
+  try { localStorage.setItem(RESULTS_KEY, JSON.stringify(results)); }
+  catch (e) { console.warn('결과 저장 실패(브라우저 저장공간 부족일 수 있음)', e); }
+}
 
 function renderResults() {
+  saveResults();
   const body = document.getElementById('resultBody');
   body.innerHTML = '';
   for (const r of results) {
@@ -89,6 +100,8 @@ function renderResults() {
     body.appendChild(tr);
   }
   document.getElementById('exportBtn').disabled = results.length === 0;
+  document.getElementById('clearBtn').disabled = results.length === 0;
+  document.getElementById('resultCount').textContent = results.length ? `결과 ${results.length}건 (브라우저에 자동 저장됨)` : '';
 }
 
 async function runSingle() {
@@ -153,13 +166,15 @@ async function runBulk() {
   }
 }
 
-async function pollJob(jobId, total) {
+async function pollJob(jobId, total, alreadyGot = 0) {
   const btn = document.getElementById('bulkBtn');
   const loading = document.getElementById('bulkLoading');
   btn.disabled = true;
   loading.style.display = 'block';
   loading.textContent = `일괄 처리 중... 0 / ${total}건 (이 창을 닫거나 새로고침해도 이어서 받아옵니다)`;
-  const before = results;   // 이번 작업 전 결과는 아래에 유지
+  // 이번 작업 전 결과는 아래에 유지. 새로고침 후 이어받는 경우, 이미 화면에 저장된 이번 작업 결과(alreadyGot건)는
+  // 서버에서 처음부터 다시 받으므로 빼고 시작한다 (중복 방지)
+  const before = results.slice(alreadyGot);
   const jobResults = [];
   let failures = 0;
   try {
@@ -167,7 +182,7 @@ async function pollJob(jobId, total) {
       let data;
       try {
         const res = await fetch(`/api/jobs/${jobId}?since=${jobResults.length}`);
-        if (res.status === 404) { alert('오류: ' + await errorText(res)); clearJob(); break; }
+        if (res.status === 404) { alert('서버가 재시작되어 남은 작업 기록이 사라졌습니다. 이미 받은 결과는 화면에 남아 있으니 엑셀로 저장하세요.'); clearJob(); break; }
         if (!res.ok) throw new Error(await errorText(res));
         data = await res.json();
         failures = 0;
@@ -180,6 +195,7 @@ async function pollJob(jobId, total) {
       jobResults.push(...data.results);
       results = jobResults.concat(before);
       renderResults();
+      saveJob({ id: jobId, total, got: jobResults.length });
       loading.textContent = `일괄 처리 중... ${data.done} / ${data.total}건 (이 창을 닫거나 새로고침해도 이어서 받아옵니다)`;
       if (data.status !== 'running') {
         clearJob();
@@ -196,24 +212,43 @@ async function pollJob(jobId, total) {
 
 // 새로고침/재접속 시 진행 중이던 작업이 있으면 이어서 받아오기
 window.addEventListener('load', () => {
+  renderResults();  // 브라우저에 저장된 이전 결과 표시
   const job = loadJob();
-  if (job && job.id) pollJob(job.id, job.total);
+  if (job && job.id) pollJob(job.id, job.total, job.got || 0);
 });
 
 async function exportExcel() {
-  const res = await fetch('/api/export/excel', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ results }),
-  });
-  if (!res.ok) { alert('엑셀 생성 실패'); return; }
-  const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'optimized_products.xlsx';
-  a.click();
-  URL.revokeObjectURL(url);
+  const btn = document.getElementById('exportBtn');
+  const label = btn.textContent;
+  btn.disabled = true;
+  // 무료 서버는 15분 동안 접속이 없으면 잠들어서, 깨어나는 데 최대 50초 정도 걸린다
+  btn.textContent = '엑셀 만드는 중... (서버가 잠들어 있으면 최대 1분)';
+  try {
+    const res = await fetch('/api/export/excel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ results }),
+    });
+    if (!res.ok) { alert('엑셀 생성 실패: ' + await errorText(res) + '\n결과는 화면에 남아 있으니 다시 눌러주세요.'); return; }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'optimized_products.xlsx';
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert('엑셀 생성 실패: ' + e + '\n결과는 화면에 남아 있으니 다시 눌러주세요.');
+  } finally {
+    btn.textContent = label;
+    btn.disabled = results.length === 0;
+  }
+}
+
+function clearResults() {
+  if (!results.length || !confirm(`결과 ${results.length}건을 화면과 브라우저 저장소에서 지울까요? (엑셀로 저장했는지 확인하세요)`)) return;
+  results = [];
+  renderResults();
 }
 
 document.getElementById('singleInput').addEventListener('keydown', (e) => {
