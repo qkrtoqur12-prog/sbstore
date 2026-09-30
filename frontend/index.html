@@ -35,8 +35,8 @@
   <div class="row">
     <input type="text" id="singleInput" placeholder="기존 상품명을 입력하세요 (예: 반려동물 방수 레인 스노우 부츠 소형견)">
     <select id="engineSelect">
+      <option value="claude" selected>Claude Haiku (유료, 건당 약 4원)</option>
       <option value="gemini">Gemini (무료, 일 20회 한도)</option>
-      <option value="claude">Claude Haiku (유료, 건당 약 3원)</option>
     </select>
     <button id="singleBtn" onclick="runSingle()">변환</button>
   </div>
@@ -47,8 +47,8 @@
   <div class="file-row">
     <input type="file" id="bulkFile" accept=".xlsx,.xls">
     <select id="engineSelectBulk">
+      <option value="claude" selected>Claude Haiku (유료, 건당 약 4원)</option>
       <option value="gemini">Gemini (무료, 일 20회 한도)</option>
-      <option value="claude">Claude Haiku (유료, 건당 약 3원)</option>
     </select>
     <button id="bulkBtn" onclick="runBulk()">엑셀 일괄 처리</button>
     <button class="secondary" onclick="exportExcel()" id="exportBtn" disabled>결과 엑셀로 저장</button>
@@ -107,8 +107,7 @@ async function runSingle() {
       body: JSON.stringify({ product_name: name, provider }),
     });
     if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: res.statusText }));
-      alert('오류: ' + (err.detail || res.statusText));
+      alert('오류: ' + await errorText(res));
       return;
     }
     const data = await res.json();
@@ -121,31 +120,85 @@ async function runSingle() {
   }
 }
 
+// 엑셀 일괄 처리: 서버가 작업 번호를 바로 돌려주고 뒤에서 처리하면, 3초마다 진행 상황과 새 결과를 받아온다.
+// (한 요청으로 끝까지 기다리면 100초에서 끊겨 결과가 버려지기 때문)
+const JOB_KEY = 'bulkJob';
+
+function saveJob(job) { try { localStorage.setItem(JOB_KEY, JSON.stringify(job)); } catch (e) {} }
+function loadJob() { try { return JSON.parse(localStorage.getItem(JOB_KEY) || 'null'); } catch (e) { return null; } }
+function clearJob() { try { localStorage.removeItem(JOB_KEY); } catch (e) {} }
+
+async function errorText(res) {
+  const err = await res.json().catch(() => null);
+  return (err && err.detail) || `서버 응답 ${res.status} ${res.statusText}`;
+}
+
 async function runBulk() {
   const fileInput = document.getElementById('bulkFile');
   if (!fileInput.files.length) { alert('엑셀 파일을 선택하세요.'); return; }
   const btn = document.getElementById('bulkBtn');
-  const loading = document.getElementById('bulkLoading');
   btn.disabled = true;
-  loading.style.display = 'block';
   try {
     const fd = new FormData();
     fd.append('file', fileInput.files[0]);
     fd.append('provider', document.getElementById('engineSelectBulk').value);
     const res = await fetch('/api/optimize/bulk', { method: 'POST', body: fd });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: res.statusText }));
-      alert('오류: ' + (err.detail || res.statusText));
-      return;
+    if (!res.ok) { alert('오류: ' + await errorText(res)); btn.disabled = false; return; }
+    const { job_id, total } = await res.json();
+    saveJob({ id: job_id, total });
+    await pollJob(job_id, total);
+  } catch (e) {
+    alert('오류: ' + e);
+    btn.disabled = false;
+  }
+}
+
+async function pollJob(jobId, total) {
+  const btn = document.getElementById('bulkBtn');
+  const loading = document.getElementById('bulkLoading');
+  btn.disabled = true;
+  loading.style.display = 'block';
+  loading.textContent = `일괄 처리 중... 0 / ${total}건 (이 창을 닫거나 새로고침해도 이어서 받아옵니다)`;
+  const before = results;   // 이번 작업 전 결과는 아래에 유지
+  const jobResults = [];
+  let failures = 0;
+  try {
+    while (true) {
+      let data;
+      try {
+        const res = await fetch(`/api/jobs/${jobId}?since=${jobResults.length}`);
+        if (res.status === 404) { alert('오류: ' + await errorText(res)); clearJob(); break; }
+        if (!res.ok) throw new Error(await errorText(res));
+        data = await res.json();
+        failures = 0;
+      } catch (e) {
+        // 일시적인 네트워크 오류는 잠시 후 다시 시도 (무료 서버가 깨어나는 중일 수도 있음)
+        if (++failures >= 20) { alert('서버와 연결이 계속 안 됩니다. 잠시 후 새로고침하면 이어서 받아옵니다.\n' + e); break; }
+        await new Promise(r => setTimeout(r, 3000));
+        continue;
+      }
+      jobResults.push(...data.results);
+      results = jobResults.concat(before);
+      renderResults();
+      loading.textContent = `일괄 처리 중... ${data.done} / ${data.total}건 (이 창을 닫거나 새로고침해도 이어서 받아옵니다)`;
+      if (data.status !== 'running') {
+        clearJob();
+        if (data.status === 'failed') alert('일괄 처리 중단: ' + data.error + '\n처리된 결과는 화면에 남아 있고 엑셀로 저장할 수 있습니다.');
+        break;
+      }
+      await new Promise(r => setTimeout(r, 3000));
     }
-    const data = await res.json();
-    results = data.concat(results);
-    renderResults();
   } finally {
     btn.disabled = false;
     loading.style.display = 'none';
   }
 }
+
+// 새로고침/재접속 시 진행 중이던 작업이 있으면 이어서 받아오기
+window.addEventListener('load', () => {
+  const job = loadJob();
+  if (job && job.id) pollJob(job.id, job.total);
+});
 
 async function exportExcel() {
   const res = await fetch('/api/export/excel', {

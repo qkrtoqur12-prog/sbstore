@@ -1,6 +1,7 @@
 import asyncio
 import os
 import secrets
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -80,6 +81,34 @@ async def optimize_single(req: OptimizeRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# 엑셀 일괄 처리는 백그라운드 작업으로 돌린다.
+# Render 앞단의 Cloudflare가 100초 안에 응답이 없으면 연결을 끊어서(524), 100건(약 15분)을 한 요청으로 기다리면 결과가 버려진다.
+# 요청은 작업 번호만 바로 돌려주고, 화면이 몇 초마다 진행 상황과 새로 끝난 결과를 받아간다.
+JOBS: dict[str, dict] = {}
+_job_tasks: set[asyncio.Task] = set()  # 작업이 도중에 가비지 컬렉션되지 않도록 참조 유지
+JOB_TTL_SEC = 6 * 3600
+MAX_CONSECUTIVE_ERRORS = 5  # API 한도 초과처럼 계속 실패하면 나머지는 돌리지 않고 멈춘다
+
+
+async def _run_bulk_job(job: dict, optimizer: ProductOptimizer, names: list[str], provider: str) -> None:
+    consecutive_errors = 0
+    for i, name in enumerate(names):
+        # Gemini 무료 티어의 분당 요청 한도를 넘지 않도록 요청 간 텀을 둔다. (Claude는 한도가 넉넉해 텀 없이 처리)
+        if i > 0 and provider == "gemini":
+            await asyncio.sleep(2.0)
+        try:
+            job["results"].append(await optimizer.optimize(name))
+            consecutive_errors = 0
+        except Exception as e:
+            consecutive_errors += 1
+            job["results"].append({"original_name": name, "optimized_name": f"오류: {e}", "optimized_name_pc": 0, "optimized_name_mobile": 0, "keywords": []})
+            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                job["status"] = "failed"
+                job["error"] = f"{MAX_CONSECUTIVE_ERRORS}건 연속 실패로 중단했습니다 ({len(job['results'])}/{job['total']}건까지 처리). 마지막 오류: {e}"
+                return
+    job["status"] = "done"
+
+
 @app.post("/api/optimize/bulk")
 async def optimize_bulk(file: UploadFile, provider: str = Form("gemini")):
     content = await file.read()
@@ -94,17 +123,39 @@ async def optimize_bulk(file: UploadFile, provider: str = Form("gemini")):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    # Gemini 무료 티어의 분당 요청 한도를 넘지 않도록 순차 처리 + 요청 간 텀을 둔다. (Claude는 한도가 넉넉해 텀 없이 처리)
-    results = []
-    for i, name in enumerate(names):
-        if i > 0 and provider == "gemini":
-            await asyncio.sleep(2.0)
-        try:
-            results.append(await optimizer.optimize(name))
-        except Exception as e:
-            results.append({"original_name": name, "optimized_name": f"오류: {e}", "optimized_name_pc": 0, "optimized_name_mobile": 0, "keywords": []})
+    now = time.time()
+    for old_id in [k for k, j in JOBS.items() if now - j["created"] > JOB_TTL_SEC]:
+        del JOBS[old_id]
 
-    return results
+    job_id = secrets.token_hex(8)
+    job = {"status": "running", "total": len(names), "results": [], "error": None, "created": now}
+    JOBS[job_id] = job
+    async def run_safely():
+        try:
+            await _run_bulk_job(job, optimizer, names, provider)
+        except Exception as e:  # 예상 못한 오류로 작업이 '처리 중'에 영원히 멈춰 보이지 않도록
+            job["status"] = "failed"
+            job["error"] = f"처리 중 오류로 중단했습니다 ({len(job['results'])}/{job['total']}건까지 처리): {e}"
+
+    task = asyncio.create_task(run_safely())
+    _job_tasks.add(task)
+    task.add_done_callback(_job_tasks.discard)
+    return {"job_id": job_id, "total": len(names)}
+
+
+@app.get("/api/jobs/{job_id}")
+async def get_job(job_id: str, since: int = 0):
+    """진행 상황 + since번째 이후 새로 끝난 결과만 돌려준다 (매번 전체를 보내지 않도록)"""
+    job = JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="작업을 찾을 수 없습니다. 서버가 재시작되어 작업 기록이 사라졌을 수 있습니다.")
+    return {
+        "status": job["status"],
+        "total": job["total"],
+        "done": len(job["results"]),
+        "error": job["error"],
+        "results": job["results"][since:],
+    }
 
 
 @app.post("/api/export/excel")
