@@ -100,6 +100,17 @@ def _dropped_words(product_name: str, name: str) -> list[str]:
     return [w for w in words if len(w) >= 2 and w not in _GENERIC_WORDS and not _QUANTITY.match(w) and w not in nm]
 
 
+_QTY_TOKEN = re.compile(r"^(\d+)(p|P|개|개입|EA|ea|매|장|쌍|세트|SET|set|종|구)$")
+
+
+def _drop_invented_quantity(product_name: str, name: str) -> str:
+    """원본에 없는 숫자로 수량을 지어낸 단어를 뺀다 (예: 강아지풀 조화 -> 강아지풀 조화 5P).
+    비슷한 상품 사례에 붙은 수량을 따라 쓰는 경우가 있어서 코드로 막는다. 원본의 숫자를 단위만 바꾼 것(10개 -> 10P)은 유지."""
+    original_numbers = set(re.findall(r"\d+", product_name))
+    kept = [t for t in name.split() if not ((m := _QTY_TOKEN.match(t)) and m.group(1) not in original_numbers)]
+    return " ".join(kept) or name
+
+
 class ProductOptimizer:
     def __init__(self, name_generator: GeminiOptimizer, naver: NaverKeywordsTool):
         self.name_generator = name_generator
@@ -213,7 +224,7 @@ class ProductOptimizer:
             retried = await self.name_generator.generate_candidates(product_name, retry_note)
             if _normalize(retried["optimized_name"]) != _normalize(product_name) and not guessed(retried["optimized_name"]):
                 candidates = retried
-        optimized_name = candidates["optimized_name"]
+        optimized_name = _drop_invented_quantity(product_name, candidates["optimized_name"])
         candidate_keywords = candidates["keywords"]
         product_type = candidates.get("product_type", "")
 
