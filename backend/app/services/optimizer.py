@@ -9,6 +9,13 @@ REFINE_CANDIDATE_COUNT = 12
 # 2차 정제(검색량 높은 동의어로 핵심 단어 교체)는 실데이터 평가에서 오히려 정확도를 떨어뜨려 기본 비활성화.
 # (2026-09-30, 사람이 수정한 상품명 80건 비교: 글자유사도 켬 0.51/0.60 -> 끔 0.57/0.66. 카네이션브로치 -> 꽃브로치, 골드링 -> 금반지처럼 넓은 고검색량어로 바꿈)
 USE_REFINE = False
+# 대신 '같은 물건의 다른 이름' 중 검색량이 확실히 높은 것으로 핵심 명사만 바꾸는 엄격한 교체를 맨 마지막에 한다.
+# 후보는 1차 호출에서 같이 받고(추가 AI 호출 없음), 교체 여부는 네이버 검색량으로 코드가 판단한다. (예: 정원딸랑이 -> 정원종)
+USE_SYNONYM_SWAP = True
+SWAP_MIN_RATIO = 3       # 후보 검색량이 원래 단어의 3배 이상일 때만
+SWAP_MIN_VOLUME = 100    # 후보 월 검색량이 100 이상일 때만
+# 이 형태 단어로 끝나는 명사는 같은 형태 단어로 끝나는 이름으로만 바꾼다 (스틱 -> 롤러, 젓가락 -> 집게 방지)
+_FORM_WORDS = ("스틱", "매트", "커버", "롤러", "스테이션", "패드", "젓가락", "집게", "케이스", "파우치", "브러쉬", "브러시")
 
 
 def _is_redundant_with_name(keyword: str, name: str) -> bool:
@@ -195,6 +202,33 @@ class ProductOptimizer:
             ), False
         return spelling_note + "\n네이버 연관검색어(실제 구매자 검색어, 월 검색량): " + ", ".join(f"{r['keyword']}({r['total']})" for r in rows), True
 
+    async def _swap_to_popular_synonym(self, name: str, candidates: dict) -> tuple[str, dict | None]:
+        """상품명의 핵심 명사를, AI가 '완전히 같은 물건'이라고 낸 다른 이름 중 검색량이 확실히 높은 것으로 바꾼다.
+        예전 2차 정제는 검색량만 보고 넓은 말/다른 물건으로 바꿔 정확도를 떨어뜨렸으므로(카네이션브로치 -> 꽃브로치, 골드링 -> 금반지)
+        후보를 동의어로 한정하고, 검색량 3배 이상 + 형태 단어 유지 + 범위 변화 없음을 모두 만족할 때만 바꾼다."""
+        core = (candidates.get("core_noun") or "").strip()
+        if len(core) < 2 or core not in name:
+            return name, None
+        alts = []
+        for a in candidates.get("same_item_names") or []:
+            a = "".join(str(a).split())
+            if not a or a == core or a in name or core in a or a in core:
+                continue  # 같은 말이거나, 범위를 좁히거나(걸이 -> 수건걸이) 넓히는 말은 제외
+            form = next((f for f in _FORM_WORDS if core.endswith(f)), None)
+            if form and not a.endswith(form):
+                continue
+            alts.append(a)
+        if not alts:
+            return name, None
+        rows = await self.naver.get_related_keywords([core] + alts[:4])
+        vol = {r["keyword"]: r["total"] for r in rows}
+        core_vol = vol.get(core, 0)
+        best = max(alts, key=lambda a: vol.get(a, 0))
+        best_vol = vol.get(best, 0)
+        if best_vol < SWAP_MIN_VOLUME or best_vol < SWAP_MIN_RATIO * max(core_vol, 1):
+            return name, None
+        return name.replace(core, best, 1), {"from": core, "to": best, "from_volume": core_vol, "to_volume": best_vol}
+
     async def optimize(self, product_name: str) -> dict:
         context, has_data = await self._build_context(product_name)
         context += get_store().context(product_name)  # 비슷한 상품의 실제 수정 사례 (없으면 빈 문자열)
@@ -260,6 +294,13 @@ class ProductOptimizer:
             except Exception:
                 pass  # 개선 실패 시 1차 초안 이름 그대로 사용
 
+        name_swap = None
+        if USE_SYNONYM_SWAP and has_data:
+            try:
+                optimized_name, name_swap = await self._swap_to_popular_synonym(optimized_name, candidates)
+            except Exception:
+                pass  # 교체 실패 시 그대로 사용
+
         # 이름이 교체되어 기존 조회 결과에 없을 수 있으므로 실제 검색량 재조회
         if optimized_name.replace(" ", "") not in volume_by_keyword:
             extra = await self.naver.get_related_keywords([optimized_name])
@@ -303,6 +344,7 @@ class ProductOptimizer:
 
         return {
             "product_type": product_type,
+            "name_swap": name_swap,  # 검색량 기준으로 핵심 명사를 바꿨다면 그 내역 (없으면 None)
             "original_name": product_name,
             "optimized_name": optimized_name,
             "optimized_name_pc": name_volume["pc"],

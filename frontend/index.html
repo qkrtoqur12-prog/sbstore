@@ -93,7 +93,7 @@ function renderResults() {
     const kwHtml = (r.keywords || []).map(k => `<span class="kw-tag">${k.keyword} <span class="vol">${k.total}</span></span>`).join(' ');
     tr.innerHTML = `
       <td>${r.original_name}</td>
-      <td><b>${r.optimized_name}</b></td>
+      <td><b>${r.optimized_name}</b>${r.name_swap ? `<div class="sub" style="margin:4px 0 0;">검색량 기준 교체: ${r.name_swap.from}(${r.name_swap.from_volume.toLocaleString()}) → ${r.name_swap.to}(${r.name_swap.to_volume.toLocaleString()})</div>` : ''}</td>
       <td>PC ${r.optimized_name_pc ?? 0} / M ${r.optimized_name_mobile ?? 0}</td>
       <td>${kwHtml}</td>
     `;
