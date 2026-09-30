@@ -119,6 +119,13 @@ def _drop_invented_quantity(product_name: str, name: str) -> str:
     return " ".join(kept) or name
 
 
+def _common_suffix_len(a: str, b: str) -> int:
+    n = 0
+    while n < min(len(a), len(b)) and a[-1 - n] == b[-1 - n]:
+        n += 1
+    return n
+
+
 class ProductOptimizer:
     def __init__(self, name_generator: GeminiOptimizer, naver: NaverKeywordsTool):
         self.name_generator = name_generator
@@ -211,11 +218,16 @@ class ProductOptimizer:
         core = (candidates.get("core_noun") or "").strip()
         if len(core) < 2 or core not in name:
             return name, None
+        other_words = [w for w in name.replace(core, " ").split() if len(w) >= 2]
         alts = []
         for a in candidates.get("same_item_names") or []:
             a = "".join(str(a).split())
             if not a or a == core or a in name or core in a or a in core:
                 continue  # 같은 말이거나, 범위를 좁히거나(걸이 -> 수건걸이) 넓히는 말은 제외
+            if any(w in a for w in other_words):
+                continue  # 상품명의 다른 단어를 품은 말은 중복·범위 변화 (강아지 샤워목줄 -> 강아지 강아지목줄, 멀티탭 거치대 -> 멀티탭 멀티탭정리함)
+            if _common_suffix_len(core, a) >= 2:
+                continue  # 물건 종류(뒷부분)는 같고 앞부분만 다르면 세부가 다른 물건 (디폼블럭 -> 나노블럭, 샤워목줄 -> 강아지목줄)
             form = next((f for f in _FORM_WORDS if core.endswith(f)), None)
             if form and not a.endswith(form):
                 continue
