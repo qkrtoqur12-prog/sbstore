@@ -9,11 +9,12 @@ REFINE_CANDIDATE_COUNT = 12
 # 2차 정제(검색량 높은 동의어로 핵심 단어 교체)는 실데이터 평가에서 오히려 정확도를 떨어뜨려 기본 비활성화.
 # (2026-09-30, 사람이 수정한 상품명 80건 비교: 글자유사도 켬 0.51/0.60 -> 끔 0.57/0.66. 카네이션브로치 -> 꽃브로치, 골드링 -> 금반지처럼 넓은 고검색량어로 바꿈)
 USE_REFINE = False
-# 대신 '같은 물건의 다른 이름' 중 검색량이 확실히 높은 것으로 핵심 명사만 바꾸는 엄격한 교체를 맨 마지막에 한다.
-# 후보는 1차 호출에서 같이 받고(추가 AI 호출 없음), 교체 여부는 네이버 검색량으로 코드가 판단한다. (예: 정원딸랑이 -> 정원종)
+# 대신 핵심 명사를 '완전히 같은 물건의 다른 이름'으로 바꾸는 교체를 맨 마지막에 한다.
+# 위탁판매라 같은 상품을 여러 판매자가 같은 이름으로 팔기 때문에, 원래 단어보다 검색량이 적더라도
+# 실제로 충분히 검색되는 다른 이름이면 바꿔서 상품명이 겹치지 않게 하는 것이 목적 (사용자 결정, 2026-09-30).
+# 후보는 1차 호출에서 같이 받고(추가 AI 호출 없음), 교체 여부는 네이버 검색량으로 코드가 판단한다. (예: 스테이플러 -> 호치키스)
 USE_SYNONYM_SWAP = True
-SWAP_MIN_RATIO = 3       # 후보 검색량이 원래 단어의 3배 이상일 때만
-SWAP_MIN_VOLUME = 100    # 후보 월 검색량이 100 이상일 때만
+SWAP_MIN_VOLUME = 500    # 후보 월 검색량이 500 이상이면 교체 (원래 단어보다 적어도 됨)
 # 이 형태 단어로 끝나는 명사는 같은 형태 단어로 끝나는 이름으로만 바꾼다 (스틱 -> 롤러, 젓가락 -> 집게 방지)
 _FORM_WORDS = ("스틱", "매트", "커버", "롤러", "스테이션", "패드", "젓가락", "집게", "케이스", "파우치", "브러쉬", "브러시")
 
@@ -205,7 +206,8 @@ class ProductOptimizer:
     async def _swap_to_popular_synonym(self, name: str, candidates: dict) -> tuple[str, dict | None]:
         """상품명의 핵심 명사를, AI가 '완전히 같은 물건'이라고 낸 다른 이름 중 검색량이 확실히 높은 것으로 바꾼다.
         예전 2차 정제는 검색량만 보고 넓은 말/다른 물건으로 바꿔 정확도를 떨어뜨렸으므로(카네이션브로치 -> 꽃브로치, 골드링 -> 금반지)
-        후보를 동의어로 한정하고, 검색량 3배 이상 + 형태 단어 유지 + 범위 변화 없음을 모두 만족할 때만 바꾼다."""
+        후보를 AI가 확신하는 동의어로 한정하고, 월 검색량 500 이상 + 형태 단어 유지 + 범위 변화 없음을 모두 만족할 때만 바꾼다.
+        (원래 단어보다 검색량이 적어도 바꾼다 - 다른 판매자와 상품명이 겹치지 않게 하는 것이 목적)"""
         core = (candidates.get("core_noun") or "").strip()
         if len(core) < 2 or core not in name:
             return name, None
@@ -225,7 +227,7 @@ class ProductOptimizer:
         core_vol = vol.get(core, 0)
         best = max(alts, key=lambda a: vol.get(a, 0))
         best_vol = vol.get(best, 0)
-        if best_vol < SWAP_MIN_VOLUME or best_vol < SWAP_MIN_RATIO * max(core_vol, 1):
+        if best_vol < SWAP_MIN_VOLUME:
             return name, None
         return name.replace(core, best, 1), {"from": core, "to": best, "from_volume": core_vol, "to_volume": best_vol}
 
