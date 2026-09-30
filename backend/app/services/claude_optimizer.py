@@ -3,6 +3,7 @@ import os
 from anthropic import AsyncAnthropic
 
 MODEL = "claude-haiku-4-5"
+PRICE_INPUT, PRICE_OUTPUT = 1.0, 5.0  # 달러 / 100만 토큰
 
 SYSTEM_PROMPT = """# 역할
 Naver Smartstore 상품명 및 키워드 최적화 전문가
@@ -33,6 +34,12 @@ Naver Smartstore 상품명 및 키워드 최적화 전문가
 9. **이미 최적이면 거의 그대로**: 원본이 이미 짧고 핵심 단어만 있으면(예: 눈사람 키링, T형 가구손잡이) 띄어쓰기/수량 정리 정도만 합니다.
 
 예시: 공갈칼 -> 가짜칼 / 시스맥스 르와 데스크 오거나이저 -> 데스크 오거나이저 / 띄움 실리콘 주방집게 -> 실리콘 주방집게 / 부착식 다용도 스텐 걸이 1P -> 부착식 스텐 걸이 / 생일 펠트 왕관 -> 생일왕관 펠트왕관
+실제 수정 사례 추가: 도루코 커터날S 10PCS -> 커터날S 10PCS (브랜드 제거) / 칼라 점멸 LED 캔들 -> LED 캔들 / 플러시 헤어 스크런치 -> 헤어 스크런치 / 클래식 샤워헤드 -> 샤워헤드 / 핸디형선풍기 -> 손풍기 (더 많이 쓰는 대체어) / 슬림도마 -> 얇은도마 / 팬시돼지 -> 돼지저금통 (상품 정체를 드러내는 명사로) / 마이룸 4단 디럭스 캐비넷 -> 4단 책상서랍 / 휴대용 접이식 수박모양 부채 -> 수박 부채 / 부착식 6구 후크 고리 -> 부착식 고리 6구 / 미니학사모 1개입 -> 미니학사모 (수량 1 생략)
+
+# 비슷한 상품 수정 사례 활용
+- 입력에 '비슷한 상품을 사람이 실제로 수정한 사례'가 있으면, 그 사람의 수정 스타일을 가장 우선으로 따르세요: 어떤 단어를 지웠는지, 어떤 대체어를 썼는지, 띄어쓰기와 수량 표기, 키워드를 어떤 식으로 조합했는지.
+- 사례의 상품이 이 상품과 같은 종류면 그 수정 방식과 키워드 패턴을 적극적으로 따라 하세요. 다른 물건이면 스타일만 참고하고, 그 상품의 단어를 이 상품에 가져오지 마세요.
+- 키워드는 사례처럼 '핵심 명사(와 동의어) + 사용장소/대상/용도/특징' 조합을 중심으로 뽑으세요. (예: 휴지통 -> 사무실휴지통, 화장대미니쓰레기통)
 
 # 진행 방식
 0. **상품 정체 파악 (가장 중요)**: 이 상품이 실제로 무엇인지(어떤 물건이고, 누가, 어디에 쓰는지)를 먼저 한 문장으로 정리합니다.
@@ -102,15 +109,34 @@ class ClaudeOptimizer:
             raise RuntimeError("ANTHROPIC_API_KEY가 설정되지 않았습니다. backend/.env에 키를 입력해주세요.")
         # 100개 이상 대량 처리 시 일시적 429/5xx 오류에 대비해 SDK 기본 재시도(2회)보다 넉넉하게 설정
         self.client = AsyncAnthropic(api_key=key, max_retries=5)
+        # 실제 사용 토큰 누적 (건당 비용을 추정이 아니라 실측으로 확인하기 위함)
+        self.usage = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0, "calls": 0}
+
+    def _record(self, resp) -> None:
+        u = resp.usage
+        self.usage["input"] += u.input_tokens
+        self.usage["cache_write"] += u.cache_creation_input_tokens or 0
+        self.usage["cache_read"] += u.cache_read_input_tokens or 0
+        self.usage["output"] += u.output_tokens
+        self.usage["calls"] += 1
+
+    def cost_usd(self) -> float:
+        u = self.usage
+        return (u["input"] * PRICE_INPUT + u["cache_write"] * PRICE_INPUT * 2.0  # 1시간 캐시 쓰기
+                + u["cache_read"] * PRICE_INPUT * 0.1 + u["output"] * PRICE_OUTPUT) / 1_000_000
 
     async def generate_candidates(self, product_name: str, context: str = "") -> dict:
         resp = await self.client.messages.create(
             model=MODEL,
             extra_body={"temperature": 0},  # 같은 입력엔 같은 결과 (SDK 1.8에 temperature 인자가 없어 extra_body로 전달)
             max_tokens=1024,
-            system=SYSTEM_PROMPT,
+            # 매번 같은 긴 시스템 프롬프트는 캐싱해서, 연속 처리 시 그 부분을 1/10 가격으로 읽는다
+            # (Haiku 4.5는 4,096토큰 이상이어야 캐싱됨 - usage의 cache_read로 실제 적용 여부 확인)
+            # 1시간 유지: 단건 입력을 띄엄띄엄 해도 1시간 안이면 캐시 재사용 (쓰기 비용은 1회 2배)
+            system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
             messages=[{"role": "user", "content": f"기존 상품명: {product_name}{context}"}],
         )
+        self._record(resp)
         raw = "".join(block.text for block in resp.content if block.type == "text")
         cleaned = _strip_code_fence(raw)
         data = json.loads(cleaned)
@@ -132,5 +158,6 @@ class ClaudeOptimizer:
                 "content": f"원본 상품명: {product_name}\n초안 상품명: {draft_name}\n상품 정체: {product_type}\n검색량 확인된 키워드(검색량 높은 순): {keyword_str}",
             }],
         )
+        self._record(resp)
         raw = "".join(block.text for block in resp.content if block.type == "text")
         return raw.strip().strip('"').strip("'").splitlines()[0].strip() if raw.strip() else draft_name

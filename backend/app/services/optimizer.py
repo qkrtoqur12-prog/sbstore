@@ -1,5 +1,6 @@
 import re
 
+from app.services.examples import get_store
 from app.services.gemini_optimizer import GeminiOptimizer
 from app.services.naver_keywordstool import NaverKeywordsTool
 
@@ -168,6 +169,7 @@ class ProductOptimizer:
 
     async def optimize(self, product_name: str) -> dict:
         context, has_data = await self._build_context(product_name)
+        context += get_store().context(product_name)  # 비슷한 상품의 실제 수정 사례 (없으면 빈 문자열)
         candidates = await self.name_generator.generate_candidates(product_name, context)
 
         def guessed(name: str) -> bool:
