@@ -62,11 +62,10 @@ class ExampleStore:
         rows = self.similar(product_name, k)
         if not rows:
             return ""
-        lines = [
-            f"- {r['original']} -> {r['changed']} | 키워드: {','.join(r['keywords'][:max_keywords])}"
-            for r in rows
-        ]
-        return "\n비슷한 상품을 사람이 실제로 수정한 사례(원본 -> 수정 | 뽑은 키워드):\n" + "\n".join(lines)
+        # 사람이 고친 이름은 대부분 '단어를 지우기만 한' 수정이라, 보여주면 AI도 지우기만 해서 다른 판매자와 이름이 겹친다.
+        # 목표가 '겹치지 않는 이름 + 메인키워드'로 바뀌었으므로(2026-10-09) 이름은 빼고 상품명과 키워드 조합 방식만 참고로 준다.
+        lines = [f"- {r['original']} | 키워드: {','.join(r['keywords'][:max_keywords])}" for r in rows]
+        return "\n비슷한 상품과 사람이 뽑은 키워드(키워드 조합 방식 참고용):\n" + "\n".join(lines)
 
 
 _store: ExampleStore | None = None

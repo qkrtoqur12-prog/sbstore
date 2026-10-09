@@ -5,6 +5,40 @@ from anthropic import AsyncAnthropic
 MODEL = "claude-haiku-4-5"
 PRICE_INPUT, PRICE_OUTPUT = 1.0, 5.0  # 달러 / 100만 토큰
 
+# Haiku가 원본과 사실상 같은 이름(띄어쓰기만 바꾸거나 단어만 지움)을 냈을 때만 부르는 상위 모델.
+# Haiku는 규칙이 많으면 '원본과 다르게'를 잘 안 따라서, 겹치는 상품만 Sonnet에게 이름을 한 번 더 받는다 (2026-10-09 사용자 결정).
+DIFF_MODEL = "claude-sonnet-5-5"
+DIFF_PRICE_INPUT, DIFF_PRICE_OUTPUT = 2.0, 10.0
+
+DIFF_SYSTEM_PROMPT = """너는 네이버 스마트스토어 위탁판매 상품명 전문가다.
+
+# 상황
+위탁판매라 같은 상품을 수많은 판매자가 원본과 같은 이름으로 판다. 지금 상품명은 원본에서 띄어쓰기를 바꾸거나 단어를 지우기만 해서 다른 판매자와 겹친다.
+
+# 할 일
+같은 물건을 가리키면서 원본과 겹치지 않는 상품명을 하나 만든다.
+1. 원본에 없는 단어를 최소 1개 넣는다. 그 단어는 구매자가 실제로 검색하는 메인키워드나 같은 물건의 다른 이름이어야 한다. 제공된 네이버 검색량을 보고 검색량이 높은 것을 고른다.
+2. 상품을 구별하는 단어(디자인, 모양, 소재, 수량, 규격)는 유지한다.
+3. 간결하게 쓴다. 같은 뜻의 단어를 반복하지 않는다.
+
+# 절대 하지 말 것
+- 다른 물건으로 바꾸기 (캔들워머 -> 캔들홀더, 젓가락 -> 집게, 트레이 -> 비즈)
+- 원본에 없는 용도/장소로 범위 좁히기 (커피바 매트 -> 커피바 드립매트, 다용도 걸이 -> 수건걸이)
+- 더 넓은 분류로 바꾸기 (브로치 -> 액세서리)
+- 성능/수량 과장 (초강력, 대용량, 고급, 프리미엄)
+- 오타 표기 쓰기 (완충재 -> 완충제)
+- 특수문자 쓰기
+
+# 좋은 예
+- 휴대용 접이식 버킷햇 -> 접이식 벙거지모자
+- LED 휴대용 안전삼각대 -> LED 차량용 비상삼각대
+- 미니 네일 파일 -> 미니 손톱줄
+- 잔꽃레이스 곱창 스크런치 -> 잔꽃레이스 곱창머리끈
+
+# 출력
+설명 없이 JSON 한 줄만 출력한다: {"name": "상품명"}
+같은 물건이면서 겹치지 않는 이름을 확신할 수 없으면 {"name": ""} 을 출력한다."""
+
 SYSTEM_PROMPT = """# 역할
 Naver Smartstore 상품명 및 키워드 최적화 전문가
 
@@ -12,8 +46,9 @@ Naver Smartstore 상품명 및 키워드 최적화 전문가
 제공된 기존 상품명을 분석하여 Naver Smartstore 판매에 최적화된 새로운 상품명과 해당 상품에 대한 15개 이상의 관련 키워드 후보 목록을 생성합니다.
 
 # 상품명 최적화 규칙 (반드시 준수)
-1. **무조건 변경**: 최적화된 상품명은 기존 상품명과 반드시 달라야 합니다. 원문 그대로 반환하는 것은 허용되지 않습니다. 최소 1개 이상의 단어를 실제로 교체/제거하세요.
-2. **불필요한 수식어/브랜드명 제거가 기본**: 실제 판매 데이터 분석 결과, 최적화된 상품명은 원본보다 **짧아지는 경우가 대부분(약 77%)**입니다. 아래와 같은 범용적인 수식어나 특정 제조사/브랜드명이 원본에 포함되어 있다면 과감히 제거하고, 핵심 키워드 위주로 간결하게 정리하는 것을 기본으로 합니다:
+1. **다른 판매자와 겹치지 않기 (가장 중요)**: 위탁판매라 수많은 판매자가 같은 상품을 원본과 같은 이름으로 팝니다. 띄어쓰기만 바꾸거나 단어를 지우기만 한 이름은 다른 판매자와 겹치므로 실패입니다. 최적화된 상품명에는 원본에 없는 단어가 최소 1개 들어가야 합니다: 핵심 명사를 같은 물건을 가리키는 검색량 높은 다른 이름(메인키워드)으로 바꾸거나, 메인키워드를 넣어 표현을 새로 구성하세요. (예: 휴대용 접이식 버킷햇 -> 접이식 벙거지모자 / LED 휴대용 안전삼각대 -> LED 차량용 비상삼각대 / 초미니 포켓 가위 -> 휴대용 미니가위)
+1-1. **메인키워드 잡기 (두 번째로 중요)**: 함께 제공되는 네이버 연관검색어(괄호 안은 월 검색량) 중, 이 상품을 정확히 가리키는(같은 물건) 검색량 높은 키워드를 상품명 앞쪽에 넣으세요. 더 넓은 분류(주방용품, 생활용품), 다른 물건, 범위를 좁힌 말은 메인키워드가 아닙니다.
+2. **불필요한 수식어/브랜드명 제거**: 아래와 같은 범용적인 수식어나 특정 제조사/브랜드명이 원본에 있으면 제거해 간결하게 합니다. 단, 제거만으로 끝내지 말고 규칙 1처럼 반드시 새 단어(메인키워드)를 넣으세요:
    - 용도: 다용도, 다목적, 차량용, 휴대용, 여행용
    - 재질: 스텐, 플라스틱, PC, 실리콘, 우드
    - 형태: 사각, 원형, 접이식, 부착식
@@ -30,11 +65,16 @@ Naver Smartstore 상품명 및 키워드 최적화 전문가
 5. **특수문자 금지**: `|`, `/`, `()`, `-`, `*`, `~`, `&` 등 특수문자를 사용하지 않습니다. 한글, 영문, 숫자, 띄어쓰기만 사용합니다.
 6. **실제 검색어 기반**: 실제 구매자가 검색할 법한 자연스럽고 창의적인 표현을 고려합니다. 사전적으로만 맞는 딱딱한 표현보다 실사용 검색어에 가깝게 만듭니다.
 7. **SEO/네이버쇼핑 로직 고려**: 핵심 키워드를 앞쪽에 배치하고, 같은 의미의 단어를 중복 나열하지 않으며, 과도한 키워드 나열은 지양하는 자연스러운 상품명 형태를 유지합니다.
-8. **원본에 없던 설명 단어를 덧붙이지 않기**: 실제 데이터에서 추가되는 단어는 거의 수량(10P, 2P)뿐입니다. '세트', '파티용품', '인테리어' 같은 단어를 새로 붙이지 마세요. 새 단어는 원본 단어를 더 많이 검색되는 대체어로 '교체'할 때만 씁니다. (예: 생일 축하 어깨띠 -> 생일어깨띠 O, 생일어깨띠 생일파티용품 X / 일반색연필 24색 -> 색연필 24색 O, 일반색연필 24색 세트 X)
-9. **이미 최적이면 거의 그대로**: 원본이 이미 짧고 핵심 단어만 있으면(예: 눈사람 키링, T형 가구손잡이) 띄어쓰기/수량 정리 정도만 합니다.
+8. **새 단어는 메인키워드/같은 물건의 다른 이름만**: 새로 넣는 단어는 구매자가 실제로 검색하는 메인키워드나 같은 물건의 다른 이름이어야 합니다. '세트', '파티용품', '인테리어' 같은 막연한 말이나 설명하는 말은 붙이지 마세요. (예: 생일어깨띠 생일파티용품 X / 일반색연필 24색 세트 X)
+9. **짧은 원본도 바꾸기**: 원본이 이미 짧아도(예: 눈사람 키링) 띄어쓰기만 바꾸지 말고, 같은 물건을 가리키는 메인키워드로 표현을 바꾸세요. (예: 눈사람 키링 -> 눈사람 열쇠고리 / 똬리 목베개 -> 똬리 넥쿠션)
 
 예시: 공갈칼 -> 가짜칼 / 시스맥스 르와 데스크 오거나이저 -> 데스크 오거나이저 / 띄움 실리콘 주방집게 -> 실리콘 주방집게 / 부착식 다용도 스텐 걸이 1P -> 부착식 스텐 걸이 / 생일 펠트 왕관 -> 생일왕관 펠트왕관
 실제 수정 사례 추가: 도루코 커터날S 10PCS -> 커터날S 10PCS (브랜드 제거) / 칼라 점멸 LED 캔들 -> LED 캔들 / 플러시 헤어 스크런치 -> 헤어 스크런치 / 클래식 샤워헤드 -> 샤워헤드 / 핸디형선풍기 -> 손풍기 (더 많이 쓰는 대체어) / 슬림도마 -> 얇은도마 / 팬시돼지 -> 돼지저금통 (상품 정체를 드러내는 명사로) / 마이룸 4단 디럭스 캐비넷 -> 4단 책상서랍 / 휴대용 접이식 수박모양 부채 -> 수박 부채 / 부착식 6구 후크 고리 -> 부착식 고리 6구 / 미니학사모 1개입 -> 미니학사모 (수량 1 생략)
+
+# 대안 상품명 (alt_name)
+- alt_name: 다른 판매자와 겹치지 않도록, 원본 상품명에 없는 단어를 반드시 1개 이상 넣은 상품명을 하나 더 적으세요. 새 단어는 이 상품과 같은 물건을 가리키는 메인키워드나 다른 이름이어야 합니다. optimized_name에 이미 원본에 없는 단어가 들어 있으면 같은 값을 적어도 됩니다.
+- 새 단어로 쓰면 안 되는 것: 성능/수량 과장(초강력, 대용량, 고급), 원본에 없는 용도로 범위를 좁히는 말(커피바 매트 -> 커피바 드립매트 X), 다른 물건, 더 넓은 분류.
+  (예: 잔꽃레이스 곱창 스크런치 -> 레이스 곱창머리끈 / 미니 네일 파일 -> 미니 손톱줄 / 투명 PVC 모서리 보호대 1P -> 투명 코너가드)
 
 # 같은 물건의 다른 이름 (검색량 비교용)
 - core_noun: 최종 상품명에서 상품 종류를 나타내는 핵심 명사를, 상품명에 쓰인 글자 그대로 적으세요. (예: 정원 딸랑이 -> 딸랑이, 바벨 펜홀더 -> 펜홀더)
@@ -42,8 +82,8 @@ Naver Smartstore 상품명 및 키워드 최적화 전문가
   다음은 절대 넣지 마세요: 더 넓은 분류(브로치 -> 액세서리, 바스켓 -> 수납함), 범위를 좁힌 말(걸이 -> 수건걸이), 재질/등급이 다른 말(골드링 -> 금반지), 형태가 다른 말(스틱 -> 롤러, 젓가락 -> 집게), 기능이 다른 말(캔들워머(데우는 기구) -> 캔들홀더(받침) X), 함께 쓰는 다른 물건.
 
 # 비슷한 상품 수정 사례 활용
-- 입력에 '비슷한 상품을 사람이 실제로 수정한 사례'가 있으면, 그 사람의 수정 스타일을 가장 우선으로 따르세요: 어떤 단어를 지웠는지, 어떤 대체어를 썼는지, 띄어쓰기와 수량 표기, 키워드를 어떤 식으로 조합했는지.
-- 사례의 상품이 이 상품과 같은 종류면 그 수정 방식과 키워드 패턴을 적극적으로 따라 하세요. 다른 물건이면 스타일만 참고하고, 그 상품의 단어를 이 상품에 가져오지 마세요.
+- 입력에 '비슷한 상품과 사람이 뽑은 키워드'가 있으면, 키워드를 어떤 식으로 조합했는지 참고하고, 그 키워드 중 이 상품과 같은 물건을 가리키는 검색어는 상품명의 메인키워드 후보로도 활용하세요.
+- 사례의 상품이 이 상품과 같은 종류면 그 키워드 패턴을 적극적으로 따라 하세요. 다른 물건이면 그 상품의 단어를 이 상품에 가져오지 마세요.
 - 키워드는 사례처럼 '핵심 명사(와 동의어) + 사용장소/대상/용도/특징' 조합을 중심으로 뽑으세요. (예: 휴지통 -> 사무실휴지통, 화장대미니쓰레기통)
 
 # 진행 방식
@@ -71,7 +111,7 @@ Naver Smartstore 상품명 및 키워드 최적화 전문가
 
 # 출력 형식
 아래 JSON 형식으로만 응답하세요. 다른 설명이나 마크다운 코드펜스 없이 순수 JSON만 출력합니다.
-{"product_type": "이 상품이 무엇인지 한 문장", "optimized_name": "최적화된 상품명", "core_noun": "핵심 명사", "same_item_names": ["같은 물건의 다른 이름"], "keywords": ["키워드1", "키워드2", "..."]}
+{"product_type": "이 상품이 무엇인지 한 문장", "optimized_name": "최적화된 상품명", "alt_name": "원본에 없는 단어를 넣은 대안 상품명", "core_noun": "핵심 명사", "same_item_names": ["같은 물건의 다른 이름"], "keywords": ["키워드1", "키워드2", "..."]}
 """
 
 REFINE_SYSTEM_PROMPT = """너는 네이버 스마트스토어 상품명을 실제 검색량 데이터로 최종 개선하는 전문가다.
@@ -120,19 +160,45 @@ class ClaudeOptimizer:
         self.client = AsyncAnthropic(api_key=key, max_retries=5)
         # 실제 사용 토큰 누적 (건당 비용을 추정이 아니라 실측으로 확인하기 위함)
         self.usage = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0, "calls": 0}
+        self.diff_usage = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0, "calls": 0}
 
-    def _record(self, resp) -> None:
+    def _record(self, resp, usage: dict | None = None) -> None:
+        usage = self.usage if usage is None else usage
         u = resp.usage
-        self.usage["input"] += u.input_tokens
-        self.usage["cache_write"] += u.cache_creation_input_tokens or 0
-        self.usage["cache_read"] += u.cache_read_input_tokens or 0
-        self.usage["output"] += u.output_tokens
-        self.usage["calls"] += 1
+        usage["input"] += u.input_tokens
+        usage["cache_write"] += u.cache_creation_input_tokens or 0
+        usage["cache_read"] += u.cache_read_input_tokens or 0
+        usage["output"] += u.output_tokens
+        usage["calls"] += 1
 
     def cost_usd(self) -> float:
-        u = self.usage
-        return (u["input"] * PRICE_INPUT + u["cache_write"] * PRICE_INPUT * 2.0  # 1시간 캐시 쓰기
-                + u["cache_read"] * PRICE_INPUT * 0.1 + u["output"] * PRICE_OUTPUT) / 1_000_000
+        def cost(u, p_in, p_out):
+            return (u["input"] * p_in + u["cache_write"] * p_in * 2.0  # 1시간 캐시 쓰기
+                    + u["cache_read"] * p_in * 0.1 + u["output"] * p_out) / 1_000_000
+        return cost(self.usage, PRICE_INPUT, PRICE_OUTPUT) + cost(self.diff_usage, DIFF_PRICE_INPUT, DIFF_PRICE_OUTPUT)
+
+    async def differentiate_name(self, product_name: str, current_name: str, product_type: str, evidence: str) -> str:
+        """원본과 겹치는 상품명일 때만 Sonnet에게 겹치지 않는 이름을 한 번 받는다. 확신이 없거나 거절되면 빈 문자열."""
+        resp = await self.client.messages.create(
+            model=DIFF_MODEL,
+            max_tokens=200,
+            # 생각 기능은 끄고(between_tools) 짧게 답하게 해서 비용을 줄인다. Sonnet 5.5는 temperature 변경 불가라 기본값 사용.
+            # fallbacks: 안전 필터 거절 시 서버가 다른 모델로 자동 재시도 (cyber/frontier_llm 분류만 해당)
+            extra_body={"thinking": {"type": "between_tools"}, "fallbacks": "default"},
+            extra_headers={"anthropic-beta": "server-side-fallback-2026-07-01"},
+            system=[{"type": "text", "text": DIFF_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
+            messages=[{"role": "user", "content": (
+                f"원본 상품명: {product_name}\n지금 상품명(원본과 겹침): {current_name}\n상품 정체: {product_type}\n{evidence}"
+            )}],
+        )
+        self._record(resp, self.diff_usage)
+        if resp.stop_reason == "refusal":
+            return ""
+        raw = "".join(block.text for block in resp.content if block.type == "text")
+        try:
+            return (json.loads(_strip_code_fence(raw)).get("name") or "").strip()
+        except (json.JSONDecodeError, AttributeError):
+            return ""
 
     async def generate_candidates(self, product_name: str, context: str = "") -> dict:
         resp = await self.client.messages.create(
@@ -152,6 +218,7 @@ class ClaudeOptimizer:
         return {
             "product_type": data.get("product_type", ""),
             "optimized_name": data["optimized_name"],
+            "alt_name": data.get("alt_name", ""),
             "core_noun": data.get("core_noun", ""),
             "same_item_names": data.get("same_item_names") or [],
             "keywords": data["keywords"],

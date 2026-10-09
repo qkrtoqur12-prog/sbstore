@@ -16,8 +16,11 @@ USE_REFINE = False
 USE_SYNONYM_SWAP = True
 SWAP_MIN_VOLUME = 500    # 후보 월 검색량이 500 이상이면 교체 (원래 단어보다 적어도 됨)
 ADDED_WORD_MIN_VOLUME = 100  # 원본과 상관없이 덧붙인 단어는 월 검색량이 이 미만이면 뺀다
+ALT_NEW_WORD_MIN_VOLUME = 100  # 대안 상품명에 새로 들어간 단어는 월 검색량이 이 이상이어야 쓴다 (실제 검색어여야 고객에게 도달)
+# 대안 상품명의 새 단어로 쓰면 안 되는 성능/수량 과장 표현 (원본에 없는데 넣으면 허위 표시가 될 수 있음)
+_CLAIM_WORDS = ("초강력", "강력", "대용량", "고급", "최고급", "프리미엄", "특대", "슈퍼", "명품", "고품질")
 # 이 형태 단어로 끝나는 명사는 같은 형태 단어로 끝나는 이름으로만 바꾼다 (스틱 -> 롤러, 젓가락 -> 집게 방지)
-_FORM_WORDS = ("스틱", "매트", "커버", "롤러", "스테이션", "패드", "젓가락", "집게", "케이스", "파우치", "브러쉬", "브러시")
+_FORM_WORDS = ("스틱", "매트", "커버", "롤러", "스테이션", "패드", "젓가락", "집게", "파우치", "브러쉬", "브러시")
 
 
 def _is_redundant_with_name(keyword: str, name: str) -> bool:
@@ -99,7 +102,7 @@ _GENERIC_WORDS = {
     "전설의", "착한", "인기", "고급", "국산", "가정용", "일반", "장식용소품", "소품", "장식품", "장난감",
     "도구", "보관", "모양", "diy", "만들기", "택1", "랜덤", "색상랜덤", "디자인랜덤",
 }
-_QUANTITY = re.compile(r"^\d+(p|ea|개|장|쌍|세트|종|구|색|묶음)?$")
+_QUANTITY = re.compile(r"^\d+(p|ea|개|개입|장|매|쌍|세트|종|구|색|묶음)?$")
 
 
 def _dropped_words(product_name: str, name: str) -> list[str]:
@@ -149,6 +152,12 @@ def _added_words(product_name: str, name: str) -> list[str]:
     orig_bigrams = _bigrams(_normalize(product_name))
     return [t for t in name.split()
             if len(t) >= 2 and not _QTY_TOKEN.match(t) and not (_bigrams(t.lower()) & orig_bigrams)]
+
+
+def _only_original_words(product_name: str, name: str) -> bool:
+    """띄어쓰기만 바꾸거나 원본 단어를 지우기만 한 이름인지 (= 다른 판매자의 원본 상품명과 사실상 같음)"""
+    original = _normalize(product_name)
+    return all(w.lower() in original for w in _words(name) if not _QUANTITY.match(w.lower()))
 
 
 def _common_suffix_len(a: str, b: str) -> int:
@@ -242,6 +251,26 @@ class ProductOptimizer:
             ), False
         return spelling_note + "\n네이버 연관검색어(실제 구매자 검색어, 월 검색량): " + ", ".join(f"{r['keyword']}({r['total']})" for r in rows), True
 
+    async def _valid_alt_name(self, product_name: str, name: str, alt: str, has_data: bool, check_narrow: bool = True) -> str | None:
+        """원본과 겹치지 않게 만든 대안 이름을 쓸 수 있는지 검증: 새 단어가 실제로 검색되고(월 100 이상), 과장 표현이 아니고,
+        근거 데이터 없는 추측이 아니어야 한다. check_narrow면 원본에 없는 용도로 범위를 좁힌 것(커피바 드립매트)도 거른다.
+        (Sonnet이 낸 이름은 판단이 더 정확해서 범위 좁힘 검사를 끈다 - 코드로는 열쇠자물쇠와 드립매트를 구별 못 함)"""
+        alt = _keep_jong(product_name, _drop_invented_quantity(product_name, (alt or "").strip()))
+        if not alt or _only_original_words(product_name, alt) or not has_data:
+            return None
+        original = _normalize(product_name)
+        new_words = [w for w in _words(alt) if w.lower() not in original and not _QUANTITY.match(w.lower())]
+        if not new_words or any(c in w for w in new_words for c in _CLAIM_WORDS):
+            return None
+        if check_narrow and _narrows_scope(product_name, name, alt):
+            return None
+        rows = await self.naver.get_related_keywords(new_words)
+        vol = {r["keyword"].lower(): r["total"] for r in rows}
+        # 새 단어 중 하나 이상은 실제로 검색되는 말이어야 한다 (조합어 일부는 검색량이 낮을 수 있음: 스티치마커 코마킹핀)
+        if not any(vol.get(w.lower(), 0) >= ALT_NEW_WORD_MIN_VOLUME for w in new_words):
+            return None
+        return alt
+
     async def _swap_to_popular_synonym(self, name: str, candidates: dict) -> tuple[str, dict | None]:
         """상품명의 핵심 명사를, AI가 '완전히 같은 물건'이라고 낸 다른 이름 중 검색량이 확실히 높은 것으로 바꾼다.
         예전 2차 정제는 검색량만 보고 넓은 말/다른 물건으로 바꿔 정확도를 떨어뜨렸으므로(카네이션브로치 -> 꽃브로치, 골드링 -> 금반지)
@@ -258,6 +287,8 @@ class ProductOptimizer:
                 continue  # 같은 말이거나, 범위를 좁히거나(걸이 -> 수건걸이) 넓히는 말은 제외
             if any(w in a for w in other_words):
                 continue  # 상품명의 다른 단어를 품은 말은 중복·범위 변화 (강아지 샤워목줄 -> 강아지 강아지목줄, 멀티탭 거치대 -> 멀티탭 멀티탭정리함)
+            if a in _spelling_variants(core):
+                continue  # ㅐ/ㅔ 오타 표기(종이완충재 -> 종이완충제)는 검색량이 있어도 상품명으로 쓰지 않는다
             if _common_suffix_len(core, a) >= 2:
                 continue  # 물건 종류(뒷부분)는 같고 앞부분만 다르면 세부가 다른 물건 (디폼블럭 -> 나노블럭, 샤워목줄 -> 강아지목줄)
             form = next((f for f in _FORM_WORDS if core.endswith(f)), None)
@@ -347,12 +378,35 @@ class ProductOptimizer:
             except Exception:
                 pass  # 개선 실패 시 1차 초안 이름 그대로 사용
 
+        # 다른 판매자와 겹치지 않기가 1순위인데, 띄어쓰기만 바꾸거나 단어를 지우기만 한 이름은 원본과 사실상 같다.
+        # 그럴 때는 AI가 같이 낸 '원본에 없는 단어를 넣은 대안 상품명'을 검증해서 쓴다 (2026-10-09 사용자 요구).
+        alt_used = False
+        if _only_original_words(product_name, optimized_name):
+            alt = await self._valid_alt_name(product_name, optimized_name, candidates.get("alt_name", ""), has_data)
+            if alt:
+                optimized_name, alt_used = alt, True
+
         name_swap = None
         if USE_SYNONYM_SWAP and has_data:
             try:
                 optimized_name, name_swap = await self._swap_to_popular_synonym(optimized_name, candidates)
             except Exception:
                 pass  # 교체 실패 시 그대로 사용
+
+        # 그래도 원본과 겹치면 상위 모델(Sonnet)에게 겹치지 않는 이름을 한 번 받는다 (해당 상품만 추가 비용)
+        differentiated = False
+        # 네이버 데이터가 없는 상품도 부른다: Sonnet이 낸 새 단어는 아래에서 실제 검색량으로 검증하므로 추측 위험이 적다
+        if _only_original_words(product_name, optimized_name) and hasattr(self.name_generator, "differentiate_name"):
+            try:
+                volumes = ", ".join(f"{r['keyword']}({r['total']})" for r in relevant_candidates[:15])
+                synonyms = ", ".join(candidates.get("same_item_names") or [])
+                evidence = f"{context}\n같은 물건의 다른 이름 후보: {synonyms or '없음'}\n키워드 검색량: {volumes or '없음'}"
+                suggestion = await self.name_generator.differentiate_name(product_name, optimized_name, product_type, evidence)
+                checked = await self._valid_alt_name(product_name, optimized_name, suggestion, True, check_narrow=False)
+                if checked:
+                    optimized_name, differentiated = checked, True
+            except Exception:
+                pass  # 실패하면 지금 이름 그대로
 
         # 이름이 교체되어 기존 조회 결과에 없을 수 있으므로 실제 검색량 재조회
         if optimized_name.replace(" ", "") not in volume_by_keyword:
@@ -398,6 +452,8 @@ class ProductOptimizer:
         return {
             "product_type": product_type,
             "name_swap": name_swap,  # 검색량 기준으로 핵심 명사를 바꿨다면 그 내역 (없으면 None)
+            "alt_used": alt_used,  # 원본과 겹쳐서 AI의 대안 상품명을 썼는지
+            "differentiated": differentiated,  # 원본과 겹쳐서 상위 모델(Sonnet)이 다시 지은 이름인지
             "original_name": product_name,
             "optimized_name": optimized_name,
             "optimized_name_pc": name_volume["pc"],
