@@ -15,6 +15,7 @@ USE_REFINE = False
 # 후보는 1차 호출에서 같이 받고(추가 AI 호출 없음), 교체 여부는 네이버 검색량으로 코드가 판단한다. (예: 스테이플러 -> 호치키스)
 USE_SYNONYM_SWAP = True
 SWAP_MIN_VOLUME = 500    # 후보 월 검색량이 500 이상이면 교체 (원래 단어보다 적어도 됨)
+ADDED_WORD_MIN_VOLUME = 100  # 원본과 상관없이 덧붙인 단어는 월 검색량이 이 미만이면 뺀다
 # 이 형태 단어로 끝나는 명사는 같은 형태 단어로 끝나는 이름으로만 바꾼다 (스틱 -> 롤러, 젓가락 -> 집게 방지)
 _FORM_WORDS = ("스틱", "매트", "커버", "롤러", "스테이션", "패드", "젓가락", "집게", "케이스", "파우치", "브러쉬", "브러시")
 
@@ -117,6 +118,37 @@ def _drop_invented_quantity(product_name: str, name: str) -> str:
     original_numbers = set(re.findall(r"\d+", product_name))
     kept = [t for t in name.split() if not ((m := _QTY_TOKEN.match(t)) and m.group(1) not in original_numbers)]
     return " ".join(kept) or name
+
+
+def _words(s: str) -> list[str]:
+    return [w for w in ("".join(ch for ch in t if ch.isalnum()) for t in s.replace("(", " ").replace(")", " ").split()) if w]
+
+
+def _distinctive_words(product_name: str) -> list[str]:
+    """원본에서 범용 수식어/수량을 뺀, 상품을 구별하는 단어들 (순서 유지)"""
+    return [w for w in _words(product_name)
+            if len(w) >= 2 and w.lower() not in _GENERIC_WORDS and not _QUANTITY.match(w.lower())]
+
+
+def _keep_jong(product_name: str, name: str) -> str:
+    """원본의 'N종'(N가지 종류)이 'NP'(N개)로 바뀌면 뜻이 달라지므로 되돌린다 (소품함 2종 세트 -> 소품함 2P 방지)"""
+    for n in set(re.findall(r"(\d+)\s*종", product_name)):
+        if f"{n}종" not in name:
+            name = re.sub(rf"(?<!\d){n}\s*[pP](?![a-zA-Z])", f"{n}종", name)
+    return name
+
+
+def _added_words(product_name: str, name: str) -> list[str]:
+    """원본 단어를 하나도 바꾸지 않았는데 원본과 글자가 전혀 안 겹치는 단어가 새로 붙었으면 그 단어들
+    (자전거 벨 -> 자전거 따릉 벨, 자동차 창문 해머 -> 자동차 창문 깨는 해머).
+    원본 단어를 지우고 다른 말로 바꾼 경우(네일 파일 -> 손톱줄)는 대체어일 수 있어 대상이 아니다.
+    사람도 검색어를 일부러 덧붙이므로(튀김방지, 계수기) 실제로 뺄지는 네이버 검색량으로 정한다."""
+    nm = _normalize(name)
+    if not all(w.lower() in nm for w in _distinctive_words(product_name)):
+        return []
+    orig_bigrams = _bigrams(_normalize(product_name))
+    return [t for t in name.split()
+            if len(t) >= 2 and not _QTY_TOKEN.match(t) and not (_bigrams(t.lower()) & orig_bigrams)]
 
 
 def _common_suffix_len(a: str, b: str) -> int:
@@ -268,7 +300,18 @@ class ProductOptimizer:
                 candidates = {**retried, "optimized_name": product_name}
         # 원본과 똑같은 이름이 나와도 다시 요청하지 않는다: 재요청해도 대부분 그대로라 비용만 늘었고(20건 중 7번, 건당 약 +1원),
         # 다른 판매자와 이름이 겹치지 않게 하는 역할은 맨 마지막의 동의어 교체가 맡는다 (사용자 결정, 2026-09-30)
-        optimized_name = _drop_invented_quantity(product_name, candidates["optimized_name"])
+        optimized_name = _keep_jong(product_name, _drop_invented_quantity(product_name, candidates["optimized_name"]))
+        # 원본과 상관없이 덧붙인 단어 중 거의 검색되지 않는 말은 뺀다 (자전거 따릉 벨 -> 자전거 벨).
+        # 사람도 검색어를 덧붙이므로(계수기, 물기제거) 월 검색량 100 이상이면 남기고, 숫자가 든 규격(23cm, 64G)은 건드리지 않는다.
+        added = [w for w in _added_words(product_name, optimized_name) if not any(ch.isdigit() for ch in w)]
+        if added:
+            try:
+                rows = await self.naver.get_related_keywords(["".join(ch for ch in w if ch.isalnum()) for w in added])
+                vol = {r["keyword"].lower(): r["total"] for r in rows}
+                drop = {w for w in added if vol.get("".join(ch for ch in w if ch.isalnum()).lower(), 0) < ADDED_WORD_MIN_VOLUME}
+                optimized_name = " ".join(t for t in optimized_name.split() if t not in drop) or optimized_name
+            except Exception:
+                pass
         candidate_keywords = candidates["keywords"]
         product_type = candidates.get("product_type", "")
 
