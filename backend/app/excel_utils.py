@@ -30,7 +30,9 @@ def build_result_excel(results: list[dict]) -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = "결과"
-    ws.append(["기존 상품명", "최적화된 상품명", "최적화상품명 PC검색량", "최적화상품명 모바일검색량", "추출 키워드 (검색량순, 복사용)"])
+    # 기존 칸 배치는 그대로 두고(복사해 쓰는 칸이 밀리지 않게) 이름 출처/후보는 맨 뒤 별도 칸에 둔다
+    ws.append(["기존 상품명", "최적화된 상품명", "최적화상품명 PC검색량", "최적화상품명 모바일검색량", "추출 키워드 (검색량순, 복사용)",
+               "이름 출처", "후보1 기본 이름", "후보2 대안 이름"])
 
     for r in results:
         keyword_str = ",".join(k["keyword"] for k in r["keywords"])
@@ -40,9 +42,12 @@ def build_result_excel(results: list[dict]) -> bytes:
             r.get("optimized_name_pc", 0),
             r.get("optimized_name_mobile", 0),
             keyword_str,
+            r.get("name_source", ""),
+            r.get("base_name", ""),
+            r.get("alt_name", ""),
         ])
 
-    for col, width in zip("ABCDE", [25, 25, 18, 20, 100]):
+    for col, width in zip("ABCDEFGH", [25, 25, 18, 20, 100, 22, 25, 25]):
         ws.column_dimensions[col].width = width
 
     buf = io.BytesIO()

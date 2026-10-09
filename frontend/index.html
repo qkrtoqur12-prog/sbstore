@@ -84,6 +84,16 @@ function saveResults() {
   catch (e) { console.warn('결과 저장 실패(브라우저 저장공간 부족일 수 있음)', e); }
 }
 
+// 최종 이름 + 어느 단계에서 나왔는지 + 후보(기본/대안 이름). 예전에 저장된 결과는 출처/후보 정보가 없을 수 있다.
+function nameCell(r) {
+  const line = (text) => `<div class="sub" style="margin:4px 0 0;">${text}</div>`;
+  let html = `<b>${r.optimized_name}</b>`;
+  if (r.name_source) html += line(`출처: ${r.name_source}`);
+  if (r.name_swap) html += line(`검색량 기준 교체: ${r.name_swap.from}(${r.name_swap.from_volume.toLocaleString()}) → ${r.name_swap.to}(${r.name_swap.to_volume.toLocaleString()})`);
+  if (r.base_name || r.alt_name) html += line(`후보1 기본: ${r.base_name || '-'}<br>후보2 대안: ${r.alt_name || '-'}`);
+  return html;
+}
+
 function renderResults() {
   saveResults();
   const body = document.getElementById('resultBody');
@@ -93,7 +103,7 @@ function renderResults() {
     const kwHtml = (r.keywords || []).map(k => `<span class="kw-tag">${k.keyword} <span class="vol">${k.total}</span></span>`).join(' ');
     tr.innerHTML = `
       <td>${r.original_name}</td>
-      <td><b>${r.optimized_name}</b>${r.name_swap ? `<div class="sub" style="margin:4px 0 0;">검색량 기준 교체: ${r.name_swap.from}(${r.name_swap.from_volume.toLocaleString()}) → ${r.name_swap.to}(${r.name_swap.to_volume.toLocaleString()})</div>` : ''}</td>
+      <td>${nameCell(r)}</td>
       <td>PC ${r.optimized_name_pc ?? 0} / M ${r.optimized_name_mobile ?? 0}</td>
       <td>${kwHtml}</td>
     `;

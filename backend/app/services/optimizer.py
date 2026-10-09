@@ -380,6 +380,7 @@ class ProductOptimizer:
 
         # 다른 판매자와 겹치지 않기가 1순위인데, 띄어쓰기만 바꾸거나 단어를 지우기만 한 이름은 원본과 사실상 같다.
         # 그럴 때는 AI가 같이 낸 '원본에 없는 단어를 넣은 대안 상품명'을 검증해서 쓴다 (2026-10-09 사용자 요구).
+        base_name = optimized_name  # 화면/엑셀에 후보로 보여줄 Haiku 기본 이름
         alt_used = False
         if _only_original_words(product_name, optimized_name):
             alt = await self._valid_alt_name(product_name, optimized_name, candidates.get("alt_name", ""), has_data)
@@ -449,8 +450,23 @@ class ProductOptimizer:
 
         name_volume = volume_by_keyword.get(optimized_name.replace(" ", ""), {"pc": 0, "mobile": 0, "total": 0})
 
+        # 최종 이름이 어느 단계에서 나왔는지 (화면과 엑셀의 별도 칸에 표시 - 상품명 칸과 섞이지 않게)
+        if differentiated:
+            name_source = "Sonnet 재작명"
+        elif alt_used:
+            name_source = "대안 이름" + (" → 동의어 교체" if name_swap else "")
+        elif name_swap:
+            name_source = "기본 이름 → 동의어 교체"
+        else:
+            name_source = "기본 이름"
+        if _only_original_words(product_name, optimized_name):
+            name_source += " (원본과 겹침)"
+
         return {
             "product_type": product_type,
+            "name_source": name_source,
+            "base_name": base_name,
+            "alt_name": (candidates.get("alt_name") or "").strip(),
             "name_swap": name_swap,  # 검색량 기준으로 핵심 명사를 바꿨다면 그 내역 (없으면 None)
             "alt_used": alt_used,  # 원본과 겹쳐서 AI의 대안 상품명을 썼는지
             "differentiated": differentiated,  # 원본과 겹쳐서 상위 모델(Sonnet)이 다시 지은 이름인지
